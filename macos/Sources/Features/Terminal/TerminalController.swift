@@ -245,6 +245,15 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     // by something like an App Intent) then we prefer the most previous main.
     static private(set) weak var lastMain: TerminalController?
 
+    /// Tracks the previously active window per tab group, keyed by the tab group's
+    /// identifier. This enables "last active tab" switching — toggling between the
+    /// current tab and the one that was focused immediately before it.
+    private static var lastActiveWindows: [NSWindow.TabbingIdentifier: Weak<NSWindow>] = [:]
+
+    /// Tracks the current key window per tab group, so we can determine the
+    /// outgoing window when a new one becomes key.
+    private static var currentKeyWindows: [NSWindow.TabbingIdentifier: Weak<NSWindow>] = [:]
+
     /// The "new window" action.
     static func newWindow(
         _ ghostty: Ghostty.App,
@@ -1207,6 +1216,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     override func windowDidBecomeKey(_ notification: Notification) {
+        // Track the previously active window for this tab group.
+        // The "current" key window recorded from the last becomeKey call
+        // becomes the "last active" for next time.
+        if let window = self.window {
+            let id = window.tabbingIdentifier
+            if let prev = Self.currentKeyWindows[id]?.value, prev != window {
+                Self.lastActiveWindows[id] = Weak(prev)
+            }
+            Self.currentKeyWindows[id] = Weak(window)
+        }
+
         super.windowDidBecomeKey(notification)
         self.relabelTabs()
         self.fixTabBar()
@@ -1516,6 +1536,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 }
             } else if tabIndex == GHOSTTY_GOTO_TAB_LAST.rawValue {
                 finalIndex = tabbedWindows.count - 1
+            } else if tabIndex == GHOSTTY_GOTO_TAB_LAST_ACTIVE.rawValue {
+                guard let lastActiveWindow = Self.lastActiveWindows[selectedWindow.tabbingIdentifier]?.value,
+                      let lastActiveIndex = tabbedWindows.firstIndex(where: { $0 == lastActiveWindow }) else {
+                    return
+                }
+                finalIndex = lastActiveIndex
             } else {
                 return
             }

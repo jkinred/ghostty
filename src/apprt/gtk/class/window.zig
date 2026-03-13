@@ -256,6 +256,15 @@ pub const Window = extern struct {
         /// setup by `setup-menu`.
         context_menu_page: ?*adw.TabPage = null,
 
+        /// The previously selected tab page, used for "last active tab"
+        /// switching. Updated whenever the selected tab changes.
+        last_active_page: ?*adw.TabPage = null,
+
+        /// The currently selected tab page. Tracked so that when the
+        /// selection changes, we can record the outgoing page as
+        /// last_active_page.
+        current_page: ?*adw.TabPage = null,
+
         // Template bindings
         tab_overview: *adw.TabOverview,
         tab_bar: *adw.TabBar,
@@ -507,6 +516,7 @@ pub const Window = extern struct {
         previous,
         next,
         last,
+        last_active,
         n: usize,
     };
 
@@ -535,6 +545,15 @@ pub const Window = extern struct {
                 0,
 
             .last => total - 1,
+
+            .last_active => {
+                const last_page = priv.last_active_page orelse return false;
+                const pos = tab_view.getPagePosition(last_page);
+                if (pos < 0 or pos >= total) return false;
+                if (pos == current) return false;
+                tab_view.setSelectedPage(last_page);
+                return true;
+            },
 
             .n => |v| n: {
                 // 1-indexed
@@ -1461,6 +1480,16 @@ pub const Window = extern struct {
         const child = page.getChild();
         assert(gobject.ext.isA(child, Tab));
 
+        // Track the previously selected page for last_active_tab switching.
+        // current_page holds whatever was selected before this callback fired.
+        // We update it to the new page at the end so it's ready for next time.
+        if (priv.current_page) |prev| {
+            if (prev != page) {
+                priv.last_active_page = prev;
+            }
+        }
+        priv.current_page = page;
+
         // Setup our binding group. This ensures things like the title
         // are synced from the active tab.
         priv.tab_bindings.setSource(child.as(gobject.Object));
@@ -1519,6 +1548,15 @@ pub const Window = extern struct {
         _: c_int,
         self: *Self,
     ) callconv(.c) void {
+        // Clear last_active_page if the detached page was our tracked one.
+        const priv = self.private();
+        if (priv.last_active_page == page) {
+            priv.last_active_page = null;
+        }
+        if (priv.current_page == page) {
+            priv.current_page = null;
+        }
+
         // We need to get the tab to disconnect the signals.
         const child = page.getChild();
         const tab = gobject.ext.cast(Tab, child) orelse return;
