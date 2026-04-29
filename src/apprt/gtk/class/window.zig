@@ -256,14 +256,10 @@ pub const Window = extern struct {
         /// setup by `setup-menu`.
         context_menu_page: ?*adw.TabPage = null,
 
-        /// The previously selected tab page, used for "last active tab"
-        /// switching. Updated whenever the selected tab changes.
-        last_active_page: ?*adw.TabPage = null,
-
-        /// The currently selected tab page. Tracked so that when the
-        /// selection changes, we can record the outgoing page as
-        /// last_active_page.
-        current_page: ?*adw.TabPage = null,
+        /// Tracks the most recently selected tab pages so that the
+        /// `goto_last_active_tab` action can toggle back to the previous
+        /// selection. Updated by signal callbacks.
+        tab_history: TabHistory = .{},
 
         // Template bindings
         tab_overview: *adw.TabOverview,
@@ -547,7 +543,7 @@ pub const Window = extern struct {
             .last => total - 1,
 
             .last_active => {
-                const last_page = priv.last_active_page orelse return false;
+                const last_page = priv.tab_history.last orelse return false;
                 const pos = tab_view.getPagePosition(last_page);
                 if (pos < 0 or pos >= total) return false;
                 if (pos == current) return false;
@@ -1480,15 +1476,7 @@ pub const Window = extern struct {
         const child = page.getChild();
         assert(gobject.ext.isA(child, Tab));
 
-        // Track the previously selected page for last_active_tab switching.
-        // current_page holds whatever was selected before this callback fired.
-        // We update it to the new page at the end so it's ready for next time.
-        if (priv.current_page) |prev| {
-            if (prev != page) {
-                priv.last_active_page = prev;
-            }
-        }
-        priv.current_page = page;
+        priv.tab_history.select(page);
 
         // Setup our binding group. This ensures things like the title
         // are synced from the active tab.
@@ -1548,14 +1536,8 @@ pub const Window = extern struct {
         _: c_int,
         self: *Self,
     ) callconv(.c) void {
-        // Clear last_active_page if the detached page was our tracked one.
         const priv = self.private();
-        if (priv.last_active_page == page) {
-            priv.last_active_page = null;
-        }
-        if (priv.current_page == page) {
-            priv.current_page = null;
-        }
+        priv.tab_history.detach(page);
 
         // We need to get the tab to disconnect the signals.
         const child = page.getChild();
@@ -2150,3 +2132,130 @@ pub const Window = extern struct {
         pub const bindTemplateCallback = C.Class.bindTemplateCallback;
     };
 };
+
+/// Tracks the current and previously selected tab pages so the
+/// `goto_last_active_tab` action can toggle between them. Pure data — the
+/// caller is responsible for invoking `select`/`detach` from the appropriate
+/// `AdwTabView` signals so the pointers stay valid.
+const TabHistory = struct {
+    /// The tab page that was selected immediately before `current`.
+    last: ?*adw.TabPage = null,
+
+    /// The tab page that is currently selected.
+    current: ?*adw.TabPage = null,
+
+    /// Record a new selection. The previously selected page (if any and
+    /// different) becomes the new `last`.
+    fn select(self: *TabHistory, page: *adw.TabPage) void {
+        if (self.current) |prev| {
+            if (prev == page) return;
+            self.last = prev;
+        }
+        self.current = page;
+    }
+
+    /// Forget a page that has been removed from the tab view so we never
+    /// dereference a freed pointer.
+    fn detach(self: *TabHistory, page: *adw.TabPage) void {
+        if (self.last == page) self.last = null;
+        if (self.current == page) self.current = null;
+    }
+};
+
+test "TabHistory: initial state is empty" {
+    const h: TabHistory = .{};
+    try std.testing.expectEqual(@as(?*adw.TabPage, null), h.last);
+    try std.testing.expectEqual(@as(?*adw.TabPage, null), h.current);
+}
+
+test "TabHistory: first select sets current, leaves last empty" {
+    var h: TabHistory = .{};
+    const a: *adw.TabPage = @ptrFromInt(0x1000);
+    h.select(a);
+    try std.testing.expectEqual(@as(?*adw.TabPage, null), h.last);
+    try std.testing.expectEqual(@as(?*adw.TabPage, a), h.current);
+}
+
+test "TabHistory: selecting the same page is a no-op" {
+    var h: TabHistory = .{};
+    const a: *adw.TabPage = @ptrFromInt(0x1000);
+    h.select(a);
+    h.select(a);
+    try std.testing.expectEqual(@as(?*adw.TabPage, null), h.last);
+    try std.testing.expectEqual(@as(?*adw.TabPage, a), h.current);
+}
+
+test "TabHistory: switching pages records the previous as last" {
+    var h: TabHistory = .{};
+    const a: *adw.TabPage = @ptrFromInt(0x1000);
+    const b: *adw.TabPage = @ptrFromInt(0x2000);
+    h.select(a);
+    h.select(b);
+    try std.testing.expectEqual(@as(?*adw.TabPage, a), h.last);
+    try std.testing.expectEqual(@as(?*adw.TabPage, b), h.current);
+}
+
+test "TabHistory: toggling between two pages swaps current/last" {
+    var h: TabHistory = .{};
+    const a: *adw.TabPage = @ptrFromInt(0x1000);
+    const b: *adw.TabPage = @ptrFromInt(0x2000);
+    h.select(a);
+    h.select(b);
+    h.select(a);
+    try std.testing.expectEqual(@as(?*adw.TabPage, b), h.last);
+    try std.testing.expectEqual(@as(?*adw.TabPage, a), h.current);
+}
+
+test "TabHistory: three-tab cycle keeps last as the immediately-previous tab" {
+    var h: TabHistory = .{};
+    const a: *adw.TabPage = @ptrFromInt(0x1000);
+    const b: *adw.TabPage = @ptrFromInt(0x2000);
+    const c: *adw.TabPage = @ptrFromInt(0x3000);
+    h.select(a);
+    h.select(b);
+    h.select(c);
+    try std.testing.expectEqual(@as(?*adw.TabPage, b), h.last);
+    try std.testing.expectEqual(@as(?*adw.TabPage, c), h.current);
+}
+
+test "TabHistory: detaching last clears it but leaves current" {
+    var h: TabHistory = .{};
+    const a: *adw.TabPage = @ptrFromInt(0x1000);
+    const b: *adw.TabPage = @ptrFromInt(0x2000);
+    h.select(a);
+    h.select(b);
+    h.detach(a);
+    try std.testing.expectEqual(@as(?*adw.TabPage, null), h.last);
+    try std.testing.expectEqual(@as(?*adw.TabPage, b), h.current);
+}
+
+test "TabHistory: detaching current clears it but leaves last" {
+    var h: TabHistory = .{};
+    const a: *adw.TabPage = @ptrFromInt(0x1000);
+    const b: *adw.TabPage = @ptrFromInt(0x2000);
+    h.select(a);
+    h.select(b);
+    h.detach(b);
+    try std.testing.expectEqual(@as(?*adw.TabPage, a), h.last);
+    try std.testing.expectEqual(@as(?*adw.TabPage, null), h.current);
+}
+
+test "TabHistory: detaching an unrelated page is a no-op" {
+    var h: TabHistory = .{};
+    const a: *adw.TabPage = @ptrFromInt(0x1000);
+    const b: *adw.TabPage = @ptrFromInt(0x2000);
+    const c: *adw.TabPage = @ptrFromInt(0x3000);
+    h.select(a);
+    h.select(b);
+    h.detach(c);
+    try std.testing.expectEqual(@as(?*adw.TabPage, a), h.last);
+    try std.testing.expectEqual(@as(?*adw.TabPage, b), h.current);
+}
+
+test "TabHistory: detaching on empty history is safe" {
+    var h: TabHistory = .{};
+    const a: *adw.TabPage = @ptrFromInt(0x1000);
+    h.detach(a);
+    try std.testing.expectEqual(@as(?*adw.TabPage, null), h.last);
+    try std.testing.expectEqual(@as(?*adw.TabPage, null), h.current);
+}
