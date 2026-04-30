@@ -543,6 +543,14 @@ pub const Action = union(enum) {
     /// Go to the last tab.
     last_tab,
 
+    /// Go to the previously active tab.
+    ///
+    /// This toggles back to the tab that was focused immediately before
+    /// the current one. Has no effect if no other tab has been focused
+    /// since the window opened, or if the previously active tab has
+    /// since been closed.
+    goto_last_active_tab,
+
     /// Go to the tab with the specific index, starting from 1.
     ///
     /// If the tab number is higher than the number of tabs,
@@ -1380,6 +1388,7 @@ pub const Action = union(enum) {
             .previous_tab,
             .next_tab,
             .last_tab,
+            .goto_last_active_tab,
             .goto_tab,
             .move_tab,
             .toggle_tab_overview,

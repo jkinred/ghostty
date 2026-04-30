@@ -2042,6 +2042,7 @@ const Action = struct {
                     .previous => .previous,
                     .next => .next,
                     .last => .last,
+                    .last_active => .last_active,
                     else => .{ .n = @intCast(@intFromEnum(tab)) },
                 });
             },
