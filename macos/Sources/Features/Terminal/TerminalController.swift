@@ -219,6 +219,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     // by something like an App Intent) then we prefer the most previous main.
     static private(set) weak var lastMain: TerminalController?
 
+    /// Tracks the previously active window per tab group. Enables "last active
+    /// tab" switching — toggling between the current tab and the one that was
+    /// focused immediately before it. Weak on both sides so entries
+    /// self-remove when the tab group or window is deallocated.
+    private static let lastActiveWindows = NSMapTable<NSWindowTabGroup, NSWindow>.weakToWeakObjects()
+
+    /// Tracks the current key window per tab group, so we can determine the
+    /// outgoing window when a new one becomes key.
+    private static let currentKeyWindows = NSMapTable<NSWindowTabGroup, NSWindow>.weakToWeakObjects()
+
     /// The "new window" action.
     static func newWindow(
         _ ghostty: Ghostty.App,
@@ -1175,6 +1185,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     override func windowDidBecomeKey(_ notification: Notification) {
+        // Track the previously active window for this tab group.
+        // The "current" key window recorded from the last becomeKey call
+        // becomes the "last active" for next time.
+        if let window = self.window, let tabGroup = window.tabGroup {
+            if let prev = Self.currentKeyWindows.object(forKey: tabGroup), prev != window {
+                Self.lastActiveWindows.setObject(prev, forKey: tabGroup)
+            }
+            Self.currentKeyWindows.setObject(window, forKey: tabGroup)
+        }
+
         super.windowDidBecomeKey(notification)
         self.relabelTabs()
         self.fixTabBar()
@@ -1484,6 +1504,12 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 }
             } else if tabIndex == GHOSTTY_GOTO_TAB_LAST.rawValue {
                 finalIndex = tabbedWindows.count - 1
+            } else if tabIndex == GHOSTTY_GOTO_TAB_LAST_ACTIVE.rawValue {
+                guard let lastActiveWindow = Self.lastActiveWindows.object(forKey: tabGroup),
+                      let lastActiveIndex = tabbedWindows.firstIndex(where: { $0 == lastActiveWindow }) else {
+                    return
+                }
+                finalIndex = lastActiveIndex
             } else {
                 return
             }
